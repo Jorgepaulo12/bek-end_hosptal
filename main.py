@@ -1,33 +1,27 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
-import jwt
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-from controler import getEmployerByReparticao,getEmployerBySector,getById
+import jwt
 import re
-from models.models import*
-from sqlalchemy import create_engine
+from models.models import *  # Certifique-se de importar corretamente seus modelos e classes Pydantic
+from sqlalchemy import create_engine,or_
+import uvicorn
 from sqlalchemy.orm import sessionmaker
+from controler import addFerias,getFerias,getLen
 from groq import Groq
-import json
-
 # Inicializar a aplicação FastAPI
 app = FastAPI()
 
 # Configurar a conexão com o banco de dados
-DATABASE_URL = "sqlite:///database/hospital.db"
-engine = create_engine(DATABASE_URL, echo=True)
+DATABASE_URI = 'limk'
+engine = create_engine(DATABASE_URI, echo=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Criar as tabelas do banco de dados
 def create_base():
     Base.metadata.create_all(bind=engine)
-
-
-def getAllEmployersByName(nome):
-    
-   return get_db().query(Employer).filter(Employer.nome.like(f"%{nome}%")).all()
 
 # Dependência para obter a sessão do banco de dados
 def get_db():
@@ -44,24 +38,18 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 1036800
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
+# Validação de usuário
 def authenticate_user(db, contact: str, password: str):
     user = db.query(User).filter(User.contact == contact).first()
     if not user or user.password != password:
         return False
     return user
 
-
-
 def validate_contact(contact: str):
-    # verificar se o contato começa com 87, 86, 84, 85, 82 ou 83 e tem exatamente 9 dígitos
     if not re.match(r'^(87|86|84|85|82|83)\d{7}$', contact):
-        raise HTTPException(status_code=400, detail="numero invalido 87, 86, 84, 85, 82, or 83 ou nao chegara  9  digitos.")
+        raise HTTPException(status_code=400, detail="Número inválido. Deve começar com 87, 86, 84, 85, 82, ou 83 e ter 9 dígitos.")
 
-
-
-
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -112,6 +100,9 @@ def read_users_me(current_user: User = Depends(get_current_user)):
     return {"username": current_user.name, "contact": current_user.contact}
 
 
+
+
+
 @app.post("/users/")
 def add_user(user: UserCreate, db: Session = Depends(get_db)):
     validate_contact(user.contact)
@@ -128,9 +119,10 @@ def add_user(user: UserCreate, db: Session = Depends(get_db)):
 
 
 
+
 # Rota para adicionar um funcionário
 @app.post("/employers/")
-def add_ereparticaomployer(employer: EmployerCreate, db: Session = Depends(get_db)):
+def add_employer(employer: EmployerCreate, db: Session = Depends(get_db)):
     new_employer = Employer(
         nome=employer.nome,
         apelido=employer.apelido,
@@ -142,162 +134,246 @@ def add_ereparticaomployer(employer: EmployerCreate, db: Session = Depends(get_d
         sexo=employer.sexo,
         inicio_funcoes=employer.inicio_funcoes,
         sector=employer.sector,
-        reparticao=employer.reparticao
+        reparticao=employer.reparticao,
+        especialidade=employer.especialidade,
+        categoria=employer.categoria,
+        nuit=employer.nuit
     )
     db.add(new_employer)
     db.commit()
     db.refresh(new_employer)
     return new_employer
 
-# Rota para listar todos os funcionários
+@app.post('/add_ferias')
+def feria(feria:FeriaModel):
+    f=addFerias(id=feria.funcionario_id)
+    return f
+@app.get('/ferias')
+def get_ferias():
+    return getFerias()
+
 @app.get("/employers/")
-def read_employers(search:str=None,db: Session = Depends(get_db)):
-    print(search)
-    if(search !=None):
-        return db.query(Employer).filter(Employer.nome.like(f"%{search}%")).all()
+def funcionarios(search: str = None, db: Session = Depends(get_db)):
+    employers = db.query(Employer).join(Feria).filter(
+    or_(
+        Employer.status == "ACTIVO",
+        Employer.status == "DISPENSA",
+        Employer.status == "LICENCA"
+    )
+).all()
+    return employers
 
-    else:
-        return db.query(Employer).all()
-
-@app.get("/employer/{id}")
-def get_by_id(id):
-    d= getById(id)
-    return d
-    
-
-
-# Rota para contar todos os usuários
-@app.get("/employer/count")
-def count_users(db: Session = Depends(get_db)):
-    count = db.query(Employer).count()
-    return {"total_users": count}
+@app.get("/employers/passados")
+def funcionarios_passados(search: str = None, db: Session = Depends(get_db)):
+    employers = db.query(Employer).filter(
+    or_(
+        
+        Employer.status == "TRASFERIDO",
+        Employer.status == "SUSPENSO",
+        Employer.status == "FALECIDO",
+        
+    )
+).all()
+    return employers
 
 
 
+#ROTAS PARA ESTATUS
 
 
-def getLen(db: Session):
-    maternidade = db.query(Employer).filter_by(sector="Maternidade").all()
-    laboratorio = db.query(Employer).filter_by(sector="Laboratório").all()
-    psiquiatria = db.query(Employer).filter_by(sector="Psiquiatria").all()
-    medicina1 = db.query(Employer).filter_by(sector="Medicina 1").all()
-    return {
-        "maternidade": maternidade,
-        "laboratorio": laboratorio,
-        "psiquiatria": psiquiatria,
-        "medicina1": medicina1
-    }
 
-# Rota para obter funcionários por setores específicos
+@app.post("/users/")
+def add_user(user: UserCreate, db: Session = Depends(get_db)):
+    validate_contact(user.contact)
+    new_user = User(
+        name=user.name,
+        contact=user.contact,
+        password=user.password
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+
+@app.get("/employers/status/transferido")
+def read_employers_by_transferido(db: Session = Depends(get_db)):
+    employers = db.query(Employer).filter(Employer.status == "TRANSFERIDO").all()
+    return employers
+
+
+@app.get("/employers/status/suspenso")
+def read_employers_by_suspenso(db: Session = Depends(get_db)):
+    employers = db.query(Employer).filter(Employer.status == "SUSPENSO").all()
+    return employers
+
+@app.get("/employers/status/aposentado")
+def read_employers_by_aposentado(db: Session = Depends(get_db)):
+    employers = db.query(Employer).filter(Employer.status == "APOSENTADO").all()
+    result = [
+        {
+            "id": emp.id,
+            "nome": emp.nome,
+            "total_dias": emp.calculate_days("APOSENTADO")
+        }
+        for emp in employers
+    ]
+    return result
+
+# Rota para listar funcionários com status "DISPENSA" e calcular total de dias
+@app.get("/employers/status/dispensa")
+def read_employers_by_dispensa(db: Session = Depends(get_db)):
+    employers = db.query(Employer).filter(Employer.status == "DISPENSA").all()
+    result = [
+        {
+            "id": emp.id,
+            "nome": emp.nome,
+            "total_dias": emp.calculate_days("DISPENSA")
+        }
+        for emp in employers
+    ]
+    return result
+
+
+
+
+@app.get("/employers/status/{status}")
+def read_employers_by_status(status: str, db: Session = Depends(get_db)):
+    valid_statuses = {"ACTIVO", "TRANSFERIDO", "SUSPENSO", "APOSENTADO", "FALECIDO","DISPENSA","LICENCA"}
+    if status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="Status inválido")
+    employers = db.query(Employer).filter(Employer.status == status).all()
+    return employers
+
+
+
+@app.get("/employers/status/falecido")
+def read_employers_by_aposentado(db: Session = Depends(get_db)):
+    employers = db.query(Employer).filter(Employer.status == "FALECIDO").all()
+    return employers
+
+
+
+
+@app.get("/employers/status/licenca")
+def read_employers_by_licenca(db: Session = Depends(get_db)):
+    employers = db.query(Employer).filter(Employer.status == "LICENCA").all()
+    result = [
+        {
+            "id": emp.id,
+            "nome": emp.nome,
+            "total_dias": emp.calculate_days("LICENCA")
+        }
+        for emp in employers
+    ]
+    return result
+
+
+
+
+# Rota para listar funcionários por setor
+@app.get("/employers/sector/{sector}")
+def read_employers_by_sector(sector: str, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.sector == sector).all()
+
+
+
+
 @app.get("/employers/sectors")
 def read_employers_by_sectors(db: Session = Depends(get_db)):
-    sectors = getLen(db)
+    sectors = getLen()
     return sectors
 
 
 
 
-
-
-
-
-
-# Rota para listar funcionários por gênero
-@app.get("/employers/genre/{genre}")
-def read_employers_by_genre(genre: str, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
-    employers = db.query(Employer).filter_by(sexo=genre).all()
-    return employers
-
-# Rota para listar funcionários por ano de início
-@app.get("/employers/year/{year}")
-def read_employers_by_year(year: int, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
-    employers = db.query(Employer).filter_by(ano_inicio=year).all()
-    return employers
-
-# Rota para listar funcionários por setor
-@app.get("/employers/sector/{sector}")
-def read_employers_by_sector(sector: str, db: Session = Depends(get_db)):
-    return getEmployerBySector(sector)
-
 # Rota para listar funcionários por naturalidade
 @app.get("/employers/naturality/{naturality}")
-def read_employers_by_naturality(naturality: str, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
-    employers = db.query(Employer).filter_by(naturalidade=naturality).all()
-    return employers
+def read_employers_by_naturality(naturality: str, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.naturalidade == naturality).all()
 
 # Rota para listar funcionários por província
 @app.get("/employers/province/{province}")
-def read_employers_by_province(province: str, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
-    employers = db.query(Employer).filter_by(provincia=province).all()
-    return employers
+def read_employers_by_province(province: str, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.provincia == province).all()
 
 # Rota para listar funcionários por nome
-
-@app.get("/employers/reparticao/{reparticao}")
-def read_employers_by_reparticao(reparticao: str, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
-    return getEmployerByReparticao(reparticao)
-
-
-
-
 @app.get("/employers/name/{name}")
-def read_employers_by_name(name: str, surename: str = None, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
+def read_employers_by_name(name: str, surename: str = None, db: Session = Depends(get_db)):
     if surename:
-        employers = db.query(Employer).filter_by(nome=name, apelido=surename).all()
+        return db.query(Employer).filter_by(nome=name, apelido=surename).all()
     else:
-        employers = db.query(Employer).filter_by(nome=name).all()
-    return employers
+        return db.query(Employer).filter_by(nome=name).all()
 
+# Rota para listar funcionários por gênero
+@app.get("/employers/genre/{genre}")
+def read_employers_by_genre(genre: str, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.sexo == genre).all()
 
+# Rota para listar funcionários por ano de início
+@app.get("/employers/year/{year}")
+def read_employers_by_year(year: int, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.ano_inicio == year).all()
 
+# Rota para atualizar o status de um funcionário
 
-# Rota para deletar um funcionário
-@app.delete("/employers/{id_employer}")
-def delete_employer(id_employer: int, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
-    employer = db.query(Employer).filter_by(id=id_employer).first()
+def calculate_days(start_date: datetime, end_date: datetime):
+    return (end_date - start_date).days if start_date and end_date else None
+
+@app.put("/employers/{id_employer}/status")
+def update_employer_status(id_employer: int, status_update: EmployerUpdateStatus, db: Session = Depends(get_db)):
+    employer = db.query(Employer).filter(Employer.id == id_employer).first()
     if not employer:
         raise HTTPException(status_code=404, detail="Employer not found")
-    db.delete(employer)
-    db.commit()
-    return {"message": "Employer deleted successfully"}
 
-# Rota para atualizar um usuário
-@app.put("/users/{id_user}")
-def update_user(id_user: int, name: str, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
-    user = db.query(User).filter_by(id=id_user).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    user.name = name
-    db.commit()
-    db.refresh(user)
-    return user
+    # Atualizar o status e outros campos
+    employer.status = status_update.status
+    employer.data_remocao = status_update.data_remocao
+    employer.razao_remocao = status_update.razao_remocao
+    employer.nova_localizacao = status_update.nova_localizacao
 
-
-# Rota para atualizar um funcionário
-@app.put("/employers/{id_employer}")
-def update_employer(id_employer: int, employer_update: EmployerUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    employer = db.query(Employer).filter_by(id=id_employer).first()
-    if not employer:
-        raise HTTPException(status_code=404, detail="Employer not found")
-    
-    for key, value in employer_update.dict(exclude_unset=True).items():
-        setattr(employer, key, value)
+    # Calcular dias baseados no status e nas datas fornecidas
+    if status_update.status == "APOSENTADO":
+        if status_update.data_inicio_aposentadoria and status_update.data_fim_aposentadoria:
+            employer.total_dias_aposentadoria = calculate_days(status_update.data_inicio_aposentadoria, status_update.data_fim_aposentadoria)
+    elif status_update.status == "LICENÇA":
+        if status_update.data_inicio_licenca and status_update.data_fim_licenca:
+            employer.total_dias_licenca = calculate_days(status_update.data_inicio_licenca, status_update.data_fim_licenca)
+    elif status_update.status == "DISPENSADO":
+        if status_update.data_inicio_dispensa and status_update.data_fim_dispensa:
+            employer.total_dias_dispensa = calculate_days(status_update.data_inicio_dispensa, status_update.data_fim_dispensa)
 
     db.commit()
     db.refresh(employer)
     return employer
 
 
-
-# Rota para deletar um usuário
-@app.delete("/users/{id_user}")
-def delete_user(id_user: int, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
-    user = db.query(User).filter_by(id=id_user).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    db.delete(user)
+# Rota para deletar um funcionário
+@app.delete("/employers/{id_employer}")
+def delete_employer(id_employer: int, db: Session = Depends(get_db)):
+    employer = db.query(Employer).filter(Employer.id == id_employer).first()
+    if not employer:
+        raise HTTPException(status_code=404, detail="Employer not found")
+    employer.status = "Removido"
+    employer.data_remocao = datetime.utcnow()
     db.commit()
-    return {"message": "User deleted successfully"}
+    return {"message": "Employer status updated to 'Removido'"}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 client = Groq(api_key="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")
@@ -323,6 +399,10 @@ def employer_to_dict(employer):
         "careira": employer.careira,
         "sector": employer.sector,
         "reparticao": employer.reparticao,
+        "categoria": employer.categoria,
+        "especialidade":employer.especialidade,
+        "nuit":employer.nuit
+
     }
 
 message_history = []
