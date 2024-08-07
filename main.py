@@ -9,14 +9,17 @@ from models.models import *  # Certifique-se de importar corretamente seus model
 from sqlalchemy import create_engine,or_
 import uvicorn
 from sqlalchemy.orm import sessionmaker
-from controler import addFerias,getFerias,getLen
+from controler import (
+    addFerias, getFerias, getLen, getEmployers, addTransferencia, addFalecido,
+    addReforma, addSuspenso, getSuspenso, getTransferencia, getReforma, getFalecido, getById
+)
+
 from groq import Groq
 # Inicializar a aplicação FastAPI
 app = FastAPI()
 
 # Configurar a conexão com o banco de dados
-DATABASE_URI = 'limk'
-engine = create_engine(DATABASE_URI, echo=True)
+engine = create_engine('sqlite:///database/hospital.db', echo=False)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Criar as tabelas do banco de dados
@@ -137,31 +140,102 @@ def add_employer(employer: EmployerCreate, db: Session = Depends(get_db)):
         reparticao=employer.reparticao,
         especialidade=employer.especialidade,
         categoria=employer.categoria,
-        nuit=employer.nuit
+        nuit=employer.nuit,
+        careira=employer.careira,
+        faixa_etaria=employer.faixa_etaria
     )
     db.add(new_employer)
     db.commit()
     db.refresh(new_employer)
     return new_employer
 
+
+
+
+
+
+
+
+
+# Rotas FastAPI
 @app.post('/add_ferias')
-def feria(feria:FeriaModel):
-    f=addFerias(id=feria.funcionario_id)
-    return f
+def feria(feria: FeriaModel):
+    try:
+        f = addFerias(id=feria.funcionario_id, start=feria.data_inicio_ferias, end=feria.data_fim_ferias)
+        return f
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar férias: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
+
+
+@app.post('/add_transferencia')
+def trasferido(transferencia: TransferenciaModal):
+    try:
+        f = addTransferencia(id=transferencia.funcionario_id, start=transferencia.data_transferido, lugar=transferencia.lugar_transferido)
+        return f
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar trasferencia: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
+
+@app.post('/add_reforma')
+def reforma(reforma: ReformaModal):
+    try:
+        r = addReforma(id=reforma.funcionario_id, data=reforma.data_reforma, idade=reforma.idade_reforma)
+        return r
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar reforma: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
+
+@app.post('/add_suspenso')
+def suspenso(suspenso: SuspensoModal):
+    try:
+        s = addSuspenso(id=suspenso.funcionario_id, data=suspenso.data_suspenso, motivo=suspenso.motivo)
+        return s
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar suspenso: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
+
+@app.post('/add_falecido')
+def falecido(falecido: FalecidoModal):
+    try:
+        return addFalecido(id=falecido.funcionario_id, data=falecido.data_falecimento, idade=falecido.idade)
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar falecido: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
+
+
+
+
+
+
+
+
+
+@app.get('/trasferido')
+def get_trasferido():
+    return getTransferencia()
+
+
+@app.get('/suspenso')
+def get_suspenso():
+    return getSuspenso()
+
+@app.get('/falecido')
+def get_falecido():
+    return getFalecido()
+
 @app.get('/ferias')
 def get_ferias():
     return getFerias()
 
 @app.get("/employers/")
 def funcionarios(search: str = None, db: Session = Depends(get_db)):
-    employers = db.query(Employer).join(Feria).filter(
-    or_(
-        Employer.status == "ACTIVO",
-        Employer.status == "DISPENSA",
-        Employer.status == "LICENCA"
-    )
-).all()
-    return employers
+    return getEmployers()
 
 @app.get("/employers/passados")
 def funcionarios_passados(search: str = None, db: Session = Depends(get_db)):
@@ -176,12 +250,11 @@ def funcionarios_passados(search: str = None, db: Session = Depends(get_db)):
 ).all()
     return employers
 
-
+@app.get("/employer/{id}")
+def funcionarios(id:int, db: Session = Depends(get_db)):
+    return getById(id)
 
 #ROTAS PARA ESTATUS
-
-
-
 @app.post("/users/")
 def add_user(user: UserCreate, db: Session = Depends(get_db)):
     validate_contact(user.contact)
@@ -196,82 +269,6 @@ def add_user(user: UserCreate, db: Session = Depends(get_db)):
     return new_user
 
 
-
-@app.get("/employers/status/transferido")
-def read_employers_by_transferido(db: Session = Depends(get_db)):
-    employers = db.query(Employer).filter(Employer.status == "TRANSFERIDO").all()
-    return employers
-
-
-@app.get("/employers/status/suspenso")
-def read_employers_by_suspenso(db: Session = Depends(get_db)):
-    employers = db.query(Employer).filter(Employer.status == "SUSPENSO").all()
-    return employers
-
-@app.get("/employers/status/aposentado")
-def read_employers_by_aposentado(db: Session = Depends(get_db)):
-    employers = db.query(Employer).filter(Employer.status == "APOSENTADO").all()
-    result = [
-        {
-            "id": emp.id,
-            "nome": emp.nome,
-            "total_dias": emp.calculate_days("APOSENTADO")
-        }
-        for emp in employers
-    ]
-    return result
-
-# Rota para listar funcionários com status "DISPENSA" e calcular total de dias
-@app.get("/employers/status/dispensa")
-def read_employers_by_dispensa(db: Session = Depends(get_db)):
-    employers = db.query(Employer).filter(Employer.status == "DISPENSA").all()
-    result = [
-        {
-            "id": emp.id,
-            "nome": emp.nome,
-            "total_dias": emp.calculate_days("DISPENSA")
-        }
-        for emp in employers
-    ]
-    return result
-
-
-
-
-@app.get("/employers/status/{status}")
-def read_employers_by_status(status: str, db: Session = Depends(get_db)):
-    valid_statuses = {"ACTIVO", "TRANSFERIDO", "SUSPENSO", "APOSENTADO", "FALECIDO","DISPENSA","LICENCA"}
-    if status not in valid_statuses:
-        raise HTTPException(status_code=400, detail="Status inválido")
-    employers = db.query(Employer).filter(Employer.status == status).all()
-    return employers
-
-
-
-@app.get("/employers/status/falecido")
-def read_employers_by_aposentado(db: Session = Depends(get_db)):
-    employers = db.query(Employer).filter(Employer.status == "FALECIDO").all()
-    return employers
-
-
-
-
-@app.get("/employers/status/licenca")
-def read_employers_by_licenca(db: Session = Depends(get_db)):
-    employers = db.query(Employer).filter(Employer.status == "LICENCA").all()
-    result = [
-        {
-            "id": emp.id,
-            "nome": emp.nome,
-            "total_dias": emp.calculate_days("LICENCA")
-        }
-        for emp in employers
-    ]
-    return result
-
-
-
-
 # Rota para listar funcionários por setor
 @app.get("/employers/sector/{sector}")
 def read_employers_by_sector(sector: str, db: Session = Depends(get_db)):
@@ -281,10 +278,9 @@ def read_employers_by_sector(sector: str, db: Session = Depends(get_db)):
 
 
 @app.get("/employers/sectors")
-def read_employers_by_sectors(db: Session = Depends(get_db)):
-    sectors = getLen()
-    return sectors
-
+def read_employers_by_sectors():
+    
+    return getLen()
 
 
 
@@ -316,38 +312,6 @@ def read_employers_by_genre(genre: str, db: Session = Depends(get_db)):
 def read_employers_by_year(year: int, db: Session = Depends(get_db)):
     return db.query(Employer).filter(Employer.ano_inicio == year).all()
 
-# Rota para atualizar o status de um funcionário
-
-def calculate_days(start_date: datetime, end_date: datetime):
-    return (end_date - start_date).days if start_date and end_date else None
-
-@app.put("/employers/{id_employer}/status")
-def update_employer_status(id_employer: int, status_update: EmployerUpdateStatus, db: Session = Depends(get_db)):
-    employer = db.query(Employer).filter(Employer.id == id_employer).first()
-    if not employer:
-        raise HTTPException(status_code=404, detail="Employer not found")
-
-    # Atualizar o status e outros campos
-    employer.status = status_update.status
-    employer.data_remocao = status_update.data_remocao
-    employer.razao_remocao = status_update.razao_remocao
-    employer.nova_localizacao = status_update.nova_localizacao
-
-    # Calcular dias baseados no status e nas datas fornecidas
-    if status_update.status == "APOSENTADO":
-        if status_update.data_inicio_aposentadoria and status_update.data_fim_aposentadoria:
-            employer.total_dias_aposentadoria = calculate_days(status_update.data_inicio_aposentadoria, status_update.data_fim_aposentadoria)
-    elif status_update.status == "LICENÇA":
-        if status_update.data_inicio_licenca and status_update.data_fim_licenca:
-            employer.total_dias_licenca = calculate_days(status_update.data_inicio_licenca, status_update.data_fim_licenca)
-    elif status_update.status == "DISPENSADO":
-        if status_update.data_inicio_dispensa and status_update.data_fim_dispensa:
-            employer.total_dias_dispensa = calculate_days(status_update.data_inicio_dispensa, status_update.data_fim_dispensa)
-
-    db.commit()
-    db.refresh(employer)
-    return employer
-
 
 # Rota para deletar um funcionário
 @app.delete("/employers/{id_employer}")
@@ -359,19 +323,6 @@ def delete_employer(id_employer: int, db: Session = Depends(get_db)):
     employer.data_remocao = datetime.utcnow()
     db.commit()
     return {"message": "Employer status updated to 'Removido'"}
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -401,7 +352,9 @@ def employer_to_dict(employer):
         "reparticao": employer.reparticao,
         "categoria": employer.categoria,
         "especialidade":employer.especialidade,
-        "nuit":employer.nuit
+        "nuit":employer.nuit,
+        "faixa_etaria":employer.faixa_etaria,
+        "status":employer.status
 
     }
 
@@ -442,6 +395,7 @@ def dina(text_input: TextInput, db: Session = Depends(get_db)):
 
     Localização: Lichinga, Niassa, Moçambique.
     """
+
     # Adiciona a mensagem do sistema ao histórico, se for a primeira interação
     if not message_history:
         message_history.append({"role": "system", "content": treino_dina})
