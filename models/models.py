@@ -42,8 +42,6 @@ class SuspensoModal(BaseModel):
     data_suspenso: datetime
     motivo:str
 
-
-
 # Modelo para Férias
 class Feria(Base):
     __tablename__ = "ferias"
@@ -131,16 +129,6 @@ class Employer(Base):
             return (datetime.utcnow() - self.data_dispensa).days
         return 0
 
-# Configuração do banco de dados
-
-# Criar motor de conexão
-engine = create_engine(DATABASE_URI, connect_args={
-    "connect_timeout": 10,
-    "read_timeout": 10,
-    "write_timeout": 10,
-})
-
-
 class EmployerCreate(BaseModel):
     nome: str
     apelido: str
@@ -179,23 +167,13 @@ class EmployerUpdate(BaseModel):
     data_aposentadoria: Optional[datetime]  # Para Aposentado
     data_falecimento: Optional[datetime]  # Para Falecido
     faixa_etaria:Optional[str]
-
-
-    
-
-
-
-
+    status:Optional[str]
 
 class EmployerUpdateStatus(BaseModel):
     status: str  # Novo status do funcionário, por exemplo, "Transferido", "Despedido", "Falecido"
     data_remocao: Optional[datetime] = None  # Data da remoção, pode ser opcional
     razao_remocao: Optional[str] = None  # Razão da remoção, pode ser opcional
     nova_localizacao: Optional[str] = None  # Nova localização se o funcionário for transferido, pode ser opcional
-
-
-
-
 
 # Modelo Pydantic para criação de usuário
 class UserCreate(BaseModel):
@@ -205,4 +183,3 @@ class UserCreate(BaseModel):
 
 
 
-Base.metadata.create_all(engine)    
