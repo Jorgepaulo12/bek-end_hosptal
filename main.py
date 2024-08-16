@@ -1,192 +1,412 @@
-from sqlalchemy import create_engine, or_
-from sqlalchemy.orm import sessionmaker, joinedload
-from sqlalchemy.exc import SQLAlchemyError
-from datetime import datetime
-from models.models import Base, Employer, Feria, Transferencia, Reforma, Suspenso, Falecido
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
+import jwt
+import re
+from models.models import * 
+import uvicorn
+from sqlalchemy.orm import sessionmaker
+from controler import *
+import os
 
-# Configurar a conexão com o banco de dados
 
-engine = create_engine('sqlite:///database/hospital.db', echo=False)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+from groq import Groq
+# Inicializar a aplicação FastAPI
+app = FastAPI()
 
-# Criar as tabelas do banco de dados se não existirem
-def create_base():
-    Base.metadata.create_all(bind=engine)
+# Configurações de segurança e criptografia
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 1036800
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-def getEmployerByReparticao(reparticao):
-    """Retorna a lista de empregados filtrados pela repartição"""
-    with SessionLocal() as db:
-        return db.query(Employer).filter_by(reparticao=reparticao).all()
+# Validação de usuário
+def authenticate_user(db, contact: str, password: str):
+    user = db.query(User).filter(User.contact == contact).first()
+    if not user or user.password != password:
+        return False
+    return user
 
-def getEmployerBySector(sector):
-    """Retorna a lista de empregados filtrados pelo setor"""
-    with SessionLocal() as db:
-        return db.query(Employer).filter_by(sector=sector).all()
+def validate_contact(contact: str):
+    if not re.match(r'^(87|86|84|85|82|83)\d{7}$', contact):
+        raise HTTPException(status_code=400, detail="Número inválido. Deve começar com 87, 86, 84, 85, 82, ou 83 e ter 9 dígitos.")
 
-def getById(id):
-    """Retorna um empregado com base no ID"""
-    with SessionLocal() as db:
-        return db.query(Employer).filter_by(id=id).first()
-
-def getLen():
-    """Retorna o número de empregados em setores específicos"""
-    setores = ["Maternidade", "Laboratorio", "Psiquiatria", "Medicina 1"]
-    contagem = {}
-    with SessionLocal() as db:
-        for setor in setores:
-            contagem[setor] = db.query(Employer).filter_by(sector=setor).count()
-    return contagem
-
-STATUS_TRANSITIONS = {
-    "ACTIVO": ["LICENCA", "TRANSFERIDO", "APOSENTADO", "SUSPENSO", "FALECIDO"],
-    "LICENCA": ["ACTIVO", "FALECIDO", "TRANSFERIDO"],
-    "TRANSFERIDO": ["ACTIVO"],
-    "APOSENTADO": [],
-    "SUSPENSO": ["ACTIVO"],
-    "FALECIDO": []
-}
-
-def is_valid_transition(current_status, new_status):
-    """ Verifica se a transição de status é válida """
-    return new_status in STATUS_TRANSITIONS.get(current_status, [])
-
-def update_status(funcionario, new_status):
-    """ Atualiza o status do funcionário se a transição for válida """
-    if is_valid_transition(funcionario.status, new_status):
-        funcionario.status = new_status
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
     else:
-        raise ValueError(f"Transição de status inválida: {funcionario.status} -> {new_status}")
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
-def addFerias(id, start=datetime.now(), end=datetime.now()):
+# Rota para login e geração de token
+@app.post("/token", response_model=dict)
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="Incorrect contact or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.contact}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# Dependência para obter o usuário atual a partir do token
+def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     try:
-        with SessionLocal() as db:
-            nova_feria = Feria(
-                funcionario_id=id,
-                data_inicio_ferias=start,
-                data_fim_ferias=end
-            )
-            funcionario = db.query(Employer).filter_by(id=id).first()
-            update_status(funcionario, "LICENCA")
-            db.add(nova_feria)
-            db.commit()
-            return nova_feria
-    except (SQLAlchemyError, ValueError) as e:
-        db.rollback()
-        print(f"Database error occurred: {str(e)}")
-        raise
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        contact: str = payload.get("sub")
+        if contact is None:
+            raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
+    user = db.query(User).filter(User.contact == contact).first()
+    if user is None:
+        raise credentials_exception
+    return user
 
+# Exemplo de rota protegida que requer autenticação
+@app.get("/users/me", response_model=dict)
+def read_users_me(current_user: User = Depends(get_current_user)):
+    return {"username": current_user.name, "contact": current_user.contact}
 
-def addTransferencia(id, start=datetime.now(), lugar=""):
+@app.post("/users/")
+def add_user(user: UserCreate, db: Session = Depends(get_db)):
+    validate_contact(user.contact)
+    new_user = User(
+        name=user.name,
+        contact=user.contact,
+        password=user.password
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+# Rota para adicionar um funcionário
+@app.post("/employers/")
+def add_employer(employer: EmployerCreate, db: Session = Depends(get_db)):
+    new_employer = Employer(
+        nome=employer.nome,
+        apelido=employer.apelido,
+        nascimento=employer.nascimento,
+        bi=employer.bi,
+        provincia=employer.provincia,
+        naturalidade=employer.naturalidade,
+        residencia=employer.residencia,
+        sexo=employer.sexo,
+        inicio_funcoes=employer.inicio_funcoes,
+        sector=employer.sector,
+        reparticao=employer.reparticao,
+        especialidade=employer.especialidade,
+        categoria=employer.categoria,
+        nuit=employer.nuit,
+        careira=employer.careira,
+        faixa_etaria=employer.faixa_etaria
+    )
+    db.add(new_employer)
+    db.commit()
+    db.refresh(new_employer)
+    return new_employer
+
+# Rotas FastAPI
+@app.post('/add_ferias')
+def feria(feria: FeriaModel):
     try:
-        with SessionLocal() as db:
-            transferencia = Transferencia(
-                funcionario_id=id,
-                data_transferido=start,
-                lugar_transferido=lugar
-            )
-            funcionario = db.query(Employer).filter_by(id=id).first()
-            update_status(funcionario, "TRANSFERIDO")
-            db.add(transferencia)
-            db.commit()
-            return transferencia
-    except (SQLAlchemyError, ValueError) as e:
-        db.rollback()
-        print(f"Database error occurred: {str(e)}")
-        raise
+        f = addFerias(id=feria.funcionario_id, start=feria.data_inicio_ferias, end=feria.data_fim_ferias)
+        return f
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar férias: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
 
-def addReforma(id, data, idade):
+
+@app.post('/add_transferencia')
+def trasferido(transferencia: TransferenciaModal):
     try:
-        with SessionLocal() as db:
-            reforma = Reforma(
-                funcionario_id=id,
-                data_reforma=data,
-                idade_reforma=idade
-            )
-            funcionario = db.query(Employer).filter_by(id=id).first()
-            update_status(funcionario, "APOSENTADO")
-            db.add(reforma)
-            db.commit()
-            return reforma
-    except (SQLAlchemyError, ValueError) as e:
-        db.rollback()
-        print(f"Database error occurred: {str(e)}")
-        raise
+        f = addTransferencia(id=transferencia.funcionario_id, start=transferencia.data_transferido, lugar=transferencia.lugar_transferido)
+        return f
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar trasferencia: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
 
-def addSuspenso(id, data=datetime.now(), motivo=""):
+@app.post('/add_reforma')
+def reforma(reforma: ReformaModal):
     try:
-        with SessionLocal() as db:
-            suspenso = Suspenso(
-                funcionario_id=id,
-                data_suspenso=data,
-                motivo=motivo
-            )
-            funcionario = db.query(Employer).filter_by(id=id).first()
-            update_status(funcionario, "SUSPENSO")
-            db.add(suspenso)
-            db.commit()
-            return suspenso
-    except (SQLAlchemyError, ValueError) as e:
-        db.rollback()
-        print(f"Database error occurred: {str(e)}")
-        raise
+        r = addReforma(id=reforma.funcionario_id, data=reforma.data_reforma, idade=reforma.idade_reforma)
+        return r
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar reforma: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
 
-def addFalecido(id, data, idade):
+@app.post('/add_suspenso')
+def suspenso(suspenso: SuspensoModal):
     try:
-        with SessionLocal() as db:
-            falecido = Falecido(
-                funcionario_id=id,
-                data_falecimento=data,
-                idade=idade
-            )
-            funcionario = db.query(Employer).filter_by(id=id).first()
-            update_status(funcionario, "FALECIDO")
-            db.add(falecido)
-            db.commit()
-            return falecido
-    except (SQLAlchemyError, ValueError) as e:
-        db.rollback()
-        print(f"Database error occurred: {str(e)}")
-        raise
+        s = addSuspenso(id=suspenso.funcionario_id, data=suspenso.data_suspenso, motivo=suspenso.motivo)
+        return s
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar suspenso: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
 
-def getTransferencia():
-    with SessionLocal() as db:
-        return db.query(Transferencia).join(Employer).all()
-
-def getSuspenso():
-    with SessionLocal() as db:
-        return db.query(Suspenso).join(Employer).all()
-
-def getReforma():
-    with SessionLocal() as db:
-        return db.query(Reforma).join(Employer).all()
-
-def getFalecido():
-    with SessionLocal() as db:
-        return db.query(Falecido).join(Employer).all()
-
-def getFerias():
-    with SessionLocal() as db:
-        return db.query(Feria).join(Employer).all()
-
-def getEmployers():
+@app.post('/add_falecido')
+def falecido(falecido: FalecidoModal):
     try:
-        with SessionLocal() as db:
-            employers = db.query(Employer).outerjoin(Feria).filter(
-                or_(
-                    Employer.status == "ACTIVO",
-                    Employer.status == "DISPENSA",
-                    Employer.status == "LICENCA"
-                )
-            ).options(joinedload(Employer.ferias)).all()
-            return employers
-    except SQLAlchemyError as e:
-        db.rollback()
-        print(f"Database error occurred: {str(e)}")
-        raise
+        return addFalecido(id=falecido.funcionario_id, data=falecido.data_falecimento, idade=falecido.idade)
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=f"Erro ao adicionar falecido: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro inesperado: {str(e)}")
+
+@app.get('/trasferido')
+def get_trasferido():
+    return getTransferencia()
+
+
+@app.get('/suspenso')
+def get_suspenso():
+    return getSuspenso()
+
+@app.get('/falecido')
+def get_falecido():
+    return getFalecido()
+
+@app.get('/ferias/')
+def get_ferias(search=""):
+    return getFerias(search)
+
+
+@app.get("/removido/")
+def remov(search: str = None, db: Session = Depends(get_db)):
+    return getEmployersRemovido()
+
+
+
+@app.get("/emp/transferidos")
+def tras(search: str = None, db: Session = Depends(get_db)):
+    return getEmployersTransferido()
+
+@app.get("/emp/licencas")
+def lice(search: str = None, db: Session = Depends(get_db)):
+    return getEmployersLICENCA(search)
+
+@app.get("/emp/suspensos")
+def susp(search: str = None, db: Session = Depends(get_db)):
+    return getEmployersSuspensed()
+
+
+
+
+@app.get("/emp/reformados")
+def refo(search: str = None, db: Session = Depends(get_db)):
+    return getEmployersReforma()
+
+@app.get("/emp/falecidos")
+def fal(search: str = None, db: Session = Depends(get_db)):
+    return getEmployersDeath()
+
+@app.get("/employers/")
+def funcionarios(search: str = None, db: Session = Depends(get_db)):
+    return getEmployers()
+
+@app.get("/employers/passados")
+def funcionarios_passados(search: str = None, db: Session = Depends(get_db)):
+    employers = db.query(Employer).filter(
+    or_(
+        
+        Employer.status == "TRASFERIDO",
+        Employer.status == "SUSPENSO",
+        Employer.status == "FALECIDO",
+        
+    )
+).all()
+    return employers
+
+@app.get("/employer/{id}")
+def funcionarios(id:int, db: Session = Depends(get_db)):
+    return getById(id)
+
+#ROTAS PARA ESTATUS
+@app.post("/users/")
+def add_user(user: UserCreate, db: Session = Depends(get_db)):
+    validate_contact(user.contact)
+    new_user = User(
+        name=user.name,
+        contact=user.contact,
+        password=user.password
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+# Rota para listar funcionários por setor
+@app.get("/employers/sector/{sector}")
+def read_employers_by_sector(sector: str, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.sector == sector).all()
+
+
+@app.get('/getbysearch/')
+def searcher(name:str,db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.nome.like(f'%{name}%')).all()
+
+@app.get("/employers/sectors")
+def read_employers_by_sectors():
+    
+    return getLen()
+
+
+
+# Rota para listar funcionários por naturalidade
+@app.get("/employers/naturality/{naturality}")
+def read_employers_by_naturality(naturality: str, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.naturalidade == naturality).all()
+
+# Rota para listar funcionários por província
+@app.get("/employers/province/{province}")
+def read_employers_by_province(province: str, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.provincia == province).all()
+
+# Rota para listar funcionários por nome
+@app.get("/employers/name/{name}")
+def read_employers_by_name(name: str, surename: str = None, db: Session = Depends(get_db)):
+    if surename:
+        return db.query(Employer).filter_by(nome=name, apelido=surename).all()
+    else:
+        return db.query(Employer).filter_by(nome=name).all()
+
+# Rota para listar funcionários por gênero
+@app.get("/employers/genre/{genre}")
+def read_employers_by_genre(genre: str, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.sexo == genre).all()
+
+# Rota para listar funcionários por ano de início
+@app.get("/employers/year/{year}")
+def read_employers_by_year(year: int, db: Session = Depends(get_db)):
+    return db.query(Employer).filter(Employer.ano_inicio == year).all()
+
+
+
+
+@app.put("/employer/{employer_id}")
+def update_employer(employer_id: int, employer_update: EmployerUpdate, db: Session = Depends(get_db)):
+    # Recupera o empregador com base no ID
+    employer = db.query(Employer).filter(Employer.id == employer_id).first()
+    
+    if not employer:
+        raise HTTPException(status_code=404, detail="Employer not found")
+    
+    # Atualiza os campos conforme fornecido no payload
+    update_data = employer_update.dict(exclude_unset=True)  # Exclui campos que não foram fornecidos
+    
+    for key, value in update_data.items():
+        setattr(employer, key, value)  # Define os novos valores
+    
+    db.commit()
+    db.refresh(employer)  # Atualiza o objeto com os dados mais recentes do banco
+    
+    return employer
+
+
+
+
+# Rota para deletar um funcionário
+@app.delete("/employers/{id_employer}")
+def delete_employer(id_employer: int, db: Session = Depends(get_db)):
+    employer = db.query(Employer).filter(Employer.id == id_employer).first()
+    if not employer:
+        raise HTTPException(status_code=404, detail="Employer not found")
+    employer.status = "Removido"
+    employer.data_remocao = datetime.utcnow()
+    db.commit()
+    return {"message": "Employer status updated to 'Removido'"}
+
+client = Groq(api_key=os.getenv("API_KEY"))
+
+# Classe para a entrada de texto
+class TextInput(BaseModel):
+    text: str
+
+def employer_to_dict(employer):
+    # Converte o objeto Employer para um dicionário, excluindo atributos não serializáveis
+    return {
+        "id": employer.id,
+        "nome": employer.nome,
+        "apelido": employer.apelido,
+        "nascimento": employer.nascimento.isoformat() if employer.nascimento else None,
+        "bi": employer.bi,
+        "provincia": employer.provincia,
+        "naturalidade": employer.naturalidade,
+        "residencia": employer.residencia,
+        "sexo": employer.sexo,
+        "inicio_funcoes": employer.inicio_funcoes.isoformat() if employer.inicio_funcoes else None,
+        "ano_inicio": employer.ano_inicio,
+        "careira": employer.careira,
+        "sector": employer.sector,
+        "reparticao": employer.reparticao,
+        "categoria": employer.categoria,
+        "especialidade":employer.especialidade,
+        "nuit":employer.nuit,
+        "faixa_etaria":employer.faixa_etaria,
+        "status":employer.status
+
+    }
+
+message_history = []
+
+@app.post('/dina')
+def dina(text_input: TextInput, db: Session = Depends(get_db)):
+    users = db.query(Employer).all()
+    text = text_input.text
+    
+    # Converte os objetos Employer para um formato serializável
+    treino_dina = f"""
+    Ola eu sou assistente IA criado e integrado no sistema de gestao de recursos humanos do hospital de lichinga, fui criada pela a BlueSpark
+    
+    {treino_ai}
+    
+    Dados do hospital:
+    {[employer_to_dict(user) for user in users]}
+
+
+    """
+
+    # Adiciona a mensagem do sistema ao histórico, se for a primeira interação
+    if not message_history:
+        message_history.append({"role": "system", "content": treino_dina})
+
+    # Adiciona a mensagem do usuário ao histórico
+    message_history.append({"role": "user", "content": text})
+
+    response = client.chat.completions.create(
+        messages=message_history,
+        model="llama3-70b-8192",
+    )
+    return response.choices[0].message.content
+
+
+
+
+
+
+# Rodar o servidor com Uvicorn
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="192.168.1.62", port=8000)
